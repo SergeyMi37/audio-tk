@@ -1,0 +1,4 @@
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.13
+pyperclip>=1.8.2
+openai-whisper>=1.0.0
