@@ -12,8 +12,10 @@ import io
 import wave
 import tempfile
 import os
+import struct
 import whisper
 import logging
+import subprocess
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,6 +48,13 @@ try:
         logger.warning("Не найдено устройств ввода звука")
     else:
         logger.info("PyAudio корректно установлен и настроен")
+    
+    # Проверка наличия ffmpeg
+    try:
+        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        logger.info("ffmpeg успешно найден")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        logger.warning("ffmpeg не найден. Whisper может не работать корректно. Установите ffmpeg для корректной работы программы.")
         
 except ImportError:
     logger.error("PyAudio не установлен или не может быть импортирован")
@@ -87,9 +96,16 @@ class VoiceTranscriberApp:
 
         self.is_recording = False
         self.recognizer = sr.Recognizer()
+        # Устанавливаем начальный порог чувствительности
+        self.recognizer.energy_threshold = 400  # Можно настроить под конкретную среду
+        
+        # Получение списка устройств ввода
+        self.input_devices = self.get_input_devices()
+        self.selected_device_id = None  # По умолчанию используем устройство по умолчанию
         
         # Инициализация модели Whisper
-        self.whisper_model = whisper.load_model("base")
+        self.available_models = ["tiny", "base", "small", "medium", "large"]
+        self.whisper_model = whisper.load_model("base")  # Модель по умолчанию
 
         self.setup_ui()
 
@@ -164,6 +180,74 @@ class VoiceTranscriberApp:
         )
         language_combo.pack(side=tk.LEFT, padx=5)
 
+        # Выбор устройства ввода
+        device_frame = ttk.Frame(main_frame)
+        device_frame.pack(pady=5)
+
+        ttk.Label(device_frame, text="Устройство ввода:").pack(side=tk.LEFT, padx=5)
+        
+        # Подготовка значений для комбобокса (форматируем названия устройств)
+        device_values = [f"{device_id}: {name}" for device_id, name in self.input_devices]
+        if not device_values:
+            device_values = ["Нет доступных устройств"]
+        
+        self.device_var = tk.StringVar()
+        if self.input_devices:
+            # Устанавливаем первое устройство как выбранное по умолчанию
+            self.device_var.set(device_values[0])
+        else:
+            self.device_var.set("Нет доступных устройств")
+            
+        self.device_combo = ttk.Combobox(
+            device_frame,
+            textvariable=self.device_var,
+            values=device_values,
+            state="readonly",
+            width=30
+        )
+        self.device_combo.pack(side=tk.LEFT, padx=5)
+        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
+
+        # Настройка чувствительности микрофона
+        sensitivity_frame = ttk.Frame(main_frame)
+        sensitivity_frame.pack(pady=5)
+
+        ttk.Label(sensitivity_frame, text="Чувствительность:").pack(side=tk.LEFT, padx=5)
+        
+        self.sensitivity_var = tk.DoubleVar(value=400.0)
+        self.sensitivity_scale = ttk.Scale(
+            sensitivity_frame,
+            from_=50,
+            to_=1000,
+            orient=tk.HORIZONTAL,
+            variable=self.sensitivity_var,
+            length=200
+        )
+        self.sensitivity_scale.pack(side=tk.LEFT, padx=5)
+        
+        self.sensitivity_label = ttk.Label(sensitivity_frame, text="400")
+        self.sensitivity_label.pack(side=tk.LEFT, padx=5)
+        
+        # Обновление метки при изменении значения
+        self.sensitivity_var.trace_add('write', self.update_sensitivity_label)
+
+        # Выбор модели распознавания
+        model_frame = ttk.Frame(main_frame)
+        model_frame.pack(pady=5)
+
+        ttk.Label(model_frame, text="Модель распознавания:").pack(side=tk.LEFT, padx=5)
+        
+        self.model_var = tk.StringVar(value="base")
+        model_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_var,
+            values=self.available_models,
+            state="readonly",
+            width=10
+        )
+        model_combo.pack(side=tk.LEFT, padx=5)
+        model_combo.bind("<<ComboboxSelected>>", self.on_model_selected)
+
         # Текстовое поле для результата
         text_frame = ttk.LabelFrame(main_frame, text="Распознанный текст")
         text_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -206,9 +290,9 @@ class VoiceTranscriberApp:
             self.start_recording()
 
     def start_recording(self):
-        # Проверка возможности создания микрофона
+        # Проверка возможности создания микрофона с выбранным устройством
         try:
-            test_microphone = SafeMicrophone()
+            test_microphone = SafeMicrophone(device_index=self.selected_device_id)
             del test_microphone  # Удаляем временный объект
         except Exception as e:
             logger.error(f"Ошибка инициализации микрофона: {e}")
@@ -237,8 +321,10 @@ class VoiceTranscriberApp:
         # Сначала выполним калибровку микрофона
         self.status_var.set("Калибровка микрофона...")
         try:
-            with sr.Microphone() as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            with sr.Microphone(device_index=self.selected_device_id) as source:
+                # Обновляем порог чувствительности до калибровки
+                self.update_energy_threshold()
+                self.recognizer.adjust_for_ambient_noise(source, duration=1.0)  # Увеличиваем время калибровки
         except Exception as e:
             logger.error(f"Ошибка калибровки микрофона: {e}")
             self.root.after(
@@ -257,39 +343,96 @@ class VoiceTranscriberApp:
             try:
                 # Создаем новый экземпляр микрофона для каждого цикла прослушивания
                 # Это помогает избежать проблем с закрытием ресурсов
-                with sr.Microphone() as source:
+                with sr.Microphone(device_index=self.selected_device_id) as source:
                     # Запись аудио с таймаутом
                     audio = self.recognizer.listen(
                         source,
-                        timeout=5,
-                        phrase_time_limit=10
+                        timeout=3,           # Уменьшаем таймаут
+                        phrase_time_limit=15 # Увеличиваем максимальное время фразы
                     )
 
                 self.status_var.set("Распознавание...")
+                
+                # Логирование параметров аудио
+                logger.info(f"Параметры аудио: sample_rate={audio.sample_rate}, sample_width={audio.sample_width}, frame_data size={len(audio.frame_data)}")
 
                 # Преобразование аудио в формат WAV для Whisper
                 wav_data = io.BytesIO()
-                with wave.open(wav_data, 'wb') as wav_file:
-                    wav_file.setnchannels(audio.sample_rate)
-                    wav_file.setsampwidth(audio.sample_width)
-                    wav_file.setframerate(audio.sample_rate)
-                    wav_file.writeframes(audio.frame_data)
                 
-                # Сохранение временного файла
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
-                    temp_file.write(wav_data.getvalue())
-                    temp_filename = temp_file.name
+                # Проверяем корректность параметров аудио для WAV формата
+                if audio.sample_width not in [1, 2, 4]:
+                    logger.warning(f"Неподдерживаемый sample_width: {audio.sample_width}. Пропускаем фрейм.")
+                    continue
+                
+                if audio.sample_rate <= 0 or audio.sample_rate > 192000:  # Максимальная частота дискретизации для WAV
+                    logger.warning(f"Неподдерживаемая частота дискретизации: {audio.sample_rate}. Пропускаем фрейм.")
+                    continue
+                
+                # speech_recognition обычно возвращает моно-аудио, поэтому количество каналов = 1
+                # Проверка количества каналов не требуется, так как оно фиксировано
                 
                 try:
+                    with wave.open(wav_data, 'wb') as wav_file:
+                        # Устанавливаем параметры аудио
+                        wav_file.setnchannels(1)  # Обычно микрофон - моно (1 канал)
+                        wav_file.setsampwidth(audio.sample_width)
+                        wav_file.setframerate(audio.sample_rate)
+                        wav_file.writeframes(audio.frame_data)
+                except struct.error as e:
+                    logger.error(f"Ошибка при записи аудиофрейма: {e}", exc_info=True)
+                    # Пропускаем этот фрейм и переходим к следующей итерации основного цикла
+                    continue
+                
+                # Сохранение временного файла
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+                        temp_file.write(wav_data.getvalue())
+                        temp_filename = temp_file.name
+                    logger.info(f"Временный файл создан: {temp_filename}")
+                except Exception as e:
+                    logger.error(f"Ошибка при создании временного файла: {e}", exc_info=True)
+                    continue
+                
+                try:
+                    # Проверяем существование временного файла перед транскрибацией
+                    if not os.path.exists(temp_filename):
+                        logger.error(f"Временный файл {temp_filename} не существует")
+                        continue
+                    
                     # Распознавание через локальную модель Whisper
+                    logger.info(f"Начинается транскрибация файла {temp_filename} с языком {self.get_whisper_language_code()}")
                     result = self.whisper_model.transcribe(temp_filename, language=self.get_whisper_language_code())
                     text = result['text']
+                    logger.info(f"Транскрибация завершена. Результат: {text}")
                     
                     # Добавление текста в поле
                     self.root.after(0, self.append_text, text)
                     
+                except FileNotFoundError as e:
+                    # Ошибка может быть вызвана отсутствием ffmpeg или другого необходимого компонента
+                    logger.error("Ошибка: необходимый компонент не найден. Установите ffmpeg для корректной работы Whisper.", exc_info=True)
+                    self.root.after(
+                        0,
+                        lambda: self.status_var.set("Ошибка: отсутствует необходимый компонент (ffmpeg), см. логи...")
+                    )
+                    continue
                 except Exception as e:
-                    logger.error(f"Ошибка транскрибации Whisper: {e}")
+                    # Проверяем, содержит ли ошибка указание на отсутствие файла, что может указывать на отсутствие ffmpeg
+                    if "file" in str(e).lower() and "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
+                        logger.error("Ошибка: необходимый компонент не найден. Установите ffmpeg для корректной работы Whisper.", exc_info=True)
+                        self.root.after(
+                            0,
+                            lambda: self.status_var.set("Ошибка: отсутствует необходимый компонент (ffmpeg), см. логи...")
+                        )
+                        continue
+                    logger.error(f"Ошибка транскрибации Whisper: {e}", exc_info=True)
+                    self.root.after(
+                        0,
+                        lambda: self.status_var.set("Ошибка транскрибации, продолжаю...")
+                    )
+                    continue
+                except Exception as e:
+                    logger.error(f"Ошибка транскрибации Whisper: {e}", exc_info=True)  # Добавляем информацию об исключении
                     self.root.after(
                         0,
                         lambda: self.status_var.set("Ошибка транскрибации, продолжаю...")
@@ -378,6 +521,67 @@ class VoiceTranscriberApp:
             "es-ES": "es"
         }
         return google_to_whisper.get(self.language_var.get(), "en")
+
+    def get_input_devices(self):
+        """Получение списка доступных устройств ввода"""
+        try:
+            audio = pyaudio.PyAudio()
+            device_count = audio.get_device_count()
+            input_devices = []
+            
+            for i in range(device_count):
+                info = audio.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:  # Устройство поддерживает ввод
+                    input_devices.append((i, info['name']))
+            
+            audio.terminate()
+            return input_devices
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка устройств ввода: {e}")
+            return []
+
+    def on_device_selected(self, event=None):
+        """Обработка выбора устройства ввода"""
+        selected_text = self.device_var.get()
+        if self.input_devices and selected_text != "Нет доступных устройств":
+            # Извлекаем ID устройства из строки (например, "0: Microphone Name" -> 0)
+            device_id_str = selected_text.split(':')[0]
+            try:
+                self.selected_device_id = int(device_id_str)
+            except ValueError:
+                self.selected_device_id = None
+        else:
+            self.selected_device_id = None
+
+    def update_sensitivity_label(self, *args):
+        """Обновление метки с текущим значением чувствительности"""
+        value = int(self.sensitivity_var.get())
+        self.sensitivity_label.config(text=str(value))
+
+    def update_energy_threshold(self):
+        """Обновление порога чувствительности"""
+        self.recognizer.energy_threshold = int(self.sensitivity_var.get())
+
+    def on_model_selected(self, event=None):
+        """Обработка выбора модели распознавания"""
+        selected_model = self.model_var.get()
+        logger.info(f"Выбрана модель распознавания: {selected_model}")
+        
+        # Загружаем новую модель в отдельном потоке, чтобы не блокировать UI
+        threading.Thread(target=self.load_model_async, args=(selected_model,), daemon=True).start()
+
+    def load_model_async(self, model_name):
+        """Асинхронная загрузка модели"""
+        try:
+            logger.info(f"Начинается загрузка модели {model_name}...")
+            self.root.after(0, lambda: self.status_var.set(f"Загрузка модели {model_name}..."))
+            self.whisper_model = whisper.load_model(model_name)
+            logger.info(f"Модель {model_name} успешно загружена")
+            self.root.after(0, lambda: self.status_var.set(f"Модель {model_name} загружена"))
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке модели {model_name}: {e}")
+            error_msg = f"Ошибка загрузки модели {model_name}: {str(e)}"
+            self.root.after(0, lambda msg=error_msg: self.status_var.set(msg))
 
 
 def main():
