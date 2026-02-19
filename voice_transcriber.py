@@ -18,7 +18,7 @@ import logging
 import subprocess
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', encoding='utf-8')
 logger = logging.getLogger(__name__)
 
 # Проверка корректности установки PyAudio
@@ -90,7 +90,7 @@ class SafeMicrophone(sr.Microphone):
 class VoiceTranscriberApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Голосовой транскрибер")
+        self.root.title("Звукозапись")
         self.root.geometry("500x400")
         self.root.resizable(True, True)
 
@@ -106,6 +106,9 @@ class VoiceTranscriberApp:
         # Инициализация модели Whisper
         self.available_models = ["tiny", "base", "small", "medium", "large"]
         self.whisper_model = whisper.load_model("base")  # Модель по умолчанию
+        
+        # Буфер для аудио данных
+        self.audio_buffer = []
 
         self.setup_ui()
 
@@ -113,23 +116,27 @@ class VoiceTranscriberApp:
         # Основной фрейм
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Настройка сетки
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(11, weight=1)  # Для текстового поля
 
-        # Заголовок
+        # Заголовок (занимает всю ширину)
         title_label = ttk.Label(
             main_frame,
             text="Транскрипция голоса в текст",
-            font=("Arial", 14, "bold")
+            font=("Arial", 1, "bold")
         )
-        title_label.pack(pady=(0, 10))
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
 
-        # Статус
+        # Статус и индикатор (в одной строке)
         self.status_var = tk.StringVar(value="Готов к записи")
         status_label = ttk.Label(
             main_frame,
             textvariable=self.status_var,
             font=("Arial", 10)
         )
-        status_label.pack(pady=5)
+        status_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
 
         # Индикатор записи
         self.indicator_canvas = tk.Canvas(
@@ -138,55 +145,64 @@ class VoiceTranscriberApp:
             height=20,
             highlightthickness=0
         )
-        self.indicator_canvas.pack(pady=5)
+        self.indicator_canvas.grid(row=1, column=2, sticky="e", pady=2)
         self.indicator = self.indicator_canvas.create_oval(
             2, 2, 18, 18,
             fill="gray",
             outline="darkgray"
         )
 
-        # Кнопки управления
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(pady=10)
-
+        # Кнопки управления (в одной строке)
         self.record_btn = ttk.Button(
-            button_frame,
+            main_frame,
             text="Начать запись",
             command=self.toggle_recording,
             width=20
         )
-        self.record_btn.pack(side=tk.LEFT, padx=5)
+        self.record_btn.grid(row=2, column=0, padx=2, pady=5, sticky="ew")
 
         self.copy_btn = ttk.Button(
-            button_frame,
+            main_frame,
             text="Копировать текст",
             command=self.copy_to_clipboard,
             width=20
         )
-        self.copy_btn.pack(side=tk.LEFT, padx=5)
+        self.copy_btn.grid(row=2, column=1, padx=2, pady=5, sticky="ew")
 
-        # Выбор языка
-        lang_frame = ttk.Frame(main_frame)
-        lang_frame.pack(pady=5)
+        # Кнопка очистки
+        clear_btn = ttk.Button(
+            main_frame,
+            text="Очистить",
+            command=self.clear_text,
+            width=15
+        )
+        clear_btn.grid(row=2, column=2, padx=2, pady=5, sticky="ew")
 
-        ttk.Label(lang_frame, text="Язык:").pack(side=tk.LEFT, padx=5)
+        # Язык (в одной строке)
+        ttk.Label(main_frame, text="Язык:").grid(row=3, column=0, sticky="w", padx=2, pady=2)
         self.language_var = tk.StringVar(value="ru-RU")
         language_combo = ttk.Combobox(
-            lang_frame,
+            main_frame,
             textvariable=self.language_var,
             values=["ru-RU", "en-US", "de-DE", "fr-FR", "es-ES"],
             state="readonly",
             width=10
         )
-        language_combo.pack(side=tk.LEFT, padx=5)
+        language_combo.grid(row=3, column=1, sticky="w", padx=2, pady=2)
 
-        # Выбор устройства ввода
-        device_frame = ttk.Frame(main_frame)
-        device_frame.pack(pady=5)
+        # Автокопирование (в той же строке, что и язык)
+        self.auto_copy_var = tk.BooleanVar(value=True)
+        auto_copy_check = ttk.Checkbutton(
+            main_frame,
+            text="Автокопирование",
+            variable=self.auto_copy_var
+        )
+        auto_copy_check.grid(row=3, column=2, sticky="w", padx=2, pady=2)
 
-        ttk.Label(device_frame, text="Устройство ввода:").pack(side=tk.LEFT, padx=5)
+        # Устройство ввода (в одной строке)
+        ttk.Label(main_frame, text="Устройство ввода:").grid(row=4, column=0, sticky="w", padx=2, pady=2)
         
-        # Подготовка значений для комбобокса (форматируем названия устройств)
+        # Подготовка значений для комбобокса (форматируем названия устройств) .encode('cp1252').decode('utf-8')
         device_values = [f"{device_id}: {name}" for device_id, name in self.input_devices]
         if not device_values:
             device_values = ["Нет доступных устройств"]
@@ -199,93 +215,73 @@ class VoiceTranscriberApp:
             self.device_var.set("Нет доступных устройств")
             
         self.device_combo = ttk.Combobox(
-            device_frame,
+            main_frame,
             textvariable=self.device_var,
             values=device_values,
             state="readonly",
             width=30
         )
-        self.device_combo.pack(side=tk.LEFT, padx=5)
+        self.device_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=2, pady=2)
         self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
 
-        # Настройка чувствительности микрофона
-        sensitivity_frame = ttk.Frame(main_frame)
-        sensitivity_frame.pack(pady=5)
-
-        ttk.Label(sensitivity_frame, text="Чувствительность:").pack(side=tk.LEFT, padx=5)
+        # Чувствительность микрофона (в одной строке)
+        ttk.Label(main_frame, text="Чувствительность:").grid(row=5, column=0, sticky="w", padx=2, pady=2)
         
         self.sensitivity_var = tk.DoubleVar(value=400.0)
         self.sensitivity_scale = ttk.Scale(
-            sensitivity_frame,
+            main_frame,
             from_=50,
             to_=1000,
             orient=tk.HORIZONTAL,
             variable=self.sensitivity_var,
             length=200
         )
-        self.sensitivity_scale.pack(side=tk.LEFT, padx=5)
+        self.sensitivity_scale.grid(row=5, column=1, sticky="ew", padx=2, pady=2)
         
-        self.sensitivity_label = ttk.Label(sensitivity_frame, text="400")
-        self.sensitivity_label.pack(side=tk.LEFT, padx=5)
+        self.sensitivity_label = ttk.Label(main_frame, text="400")
+        self.sensitivity_label.grid(row=5, column=2, sticky="w", padx=2, pady=2)
         
         # Обновление метки при изменении значения
         self.sensitivity_var.trace_add('write', self.update_sensitivity_label)
 
-        # Выбор модели распознавания
-        model_frame = ttk.Frame(main_frame)
-        model_frame.pack(pady=5)
-
-        ttk.Label(model_frame, text="Модель распознавания:").pack(side=tk.LEFT, padx=5)
+        # Модель распознавания (в одной строке)
+        ttk.Label(main_frame, text="Модель распознавания:").grid(row=6, column=0, sticky="w", padx=2, pady=2)
         
         self.model_var = tk.StringVar(value="base")
         model_combo = ttk.Combobox(
-            model_frame,
+            main_frame,
             textvariable=self.model_var,
             values=self.available_models,
             state="readonly",
             width=10
         )
-        model_combo.pack(side=tk.LEFT, padx=5)
+        model_combo.grid(row=6, column=1, sticky="w", padx=2, pady=2)
         model_combo.bind("<<ComboboxSelected>>", self.on_model_selected)
 
-        # Текстовое поле для результата
+        # Пустая строка для разделения
+        ttk.Separator(main_frame, orient="horizontal").grid(row=7, column=0, columnspan=3, sticky="ew", pady=5)
+
+        # Текстовое поле для результата (занимает оставшееся пространство)
         text_frame = ttk.LabelFrame(main_frame, text="Распознанный текст")
-        text_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        text_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=5)
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
 
         # Scrollbar
         scrollbar = ttk.Scrollbar(text_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
         self.text_area = tk.Text(
             text_frame,
             wrap=tk.WORD,
-            font=("Arial", 11),
-            yscrollcommand=scrollbar.set
+            font=("Arial", 11)
         )
-        self.text_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.text_area.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         scrollbar.config(command=self.text_area.yview)
-
-        # Кнопка очистки
-        clear_btn = ttk.Button(
-            main_frame,
-            text="Очистить",
-            command=self.clear_text,
-            width=15
-        )
-        clear_btn.pack(pady=5)
-
-        # Автокопирование
-        self.auto_copy_var = tk.BooleanVar(value=True)
-        auto_copy_check = ttk.Checkbutton(
-            main_frame,
-            text="Автоматически копировать в буфер обмена",
-            variable=self.auto_copy_var
-        )
-        auto_copy_check.pack(pady=5)
 
     def toggle_recording(self):
         if self.is_recording:
-            self.stop_recording()
+            self.finish_recording()
         else:
             self.start_recording()
 
@@ -303,9 +299,12 @@ class VoiceTranscriberApp:
             return
             
         self.is_recording = True
-        self.record_btn.config(text="Остановить запись")
+        self.record_btn.config(text="Закончить запись")
         self.indicator_canvas.itemconfig(self.indicator, fill="red")
         self.status_var.set("Запись... Говорите в микрофон")
+
+        # Очистка аудио буфера перед началом новой записи
+        self.audio_buffer = []
 
         # Запуск в отдельном потоке
         self.record_thread = threading.Thread(target=self.record_audio, daemon=True)
@@ -316,6 +315,16 @@ class VoiceTranscriberApp:
         self.record_btn.config(text="Начать запись")
         self.indicator_canvas.itemconfig(self.indicator, fill="gray")
         self.status_var.set("Готов к записи")
+        
+    def finish_recording(self):
+        self.is_recording = False
+        self.record_btn.config(text="Обработка...")
+        self.indicator_canvas.itemconfig(self.indicator, fill="yellow")
+        self.status_var.set("Обработка записи...")
+        
+        # Запуск транскрибации в отдельном потоке
+        transcribe_thread = threading.Thread(target=self.transcribe_audio_buffer, daemon=True)
+        transcribe_thread.start()
 
     def record_audio(self):
         # Сначала выполним калибровку микрофона
@@ -477,6 +486,102 @@ class VoiceTranscriberApp:
         # В конце останавливаем запись
         self.root.after(0, self.stop_recording)
 
+    def transcribe_audio_buffer(self):
+        """Транскрибирует весь аудио буфер за раз"""
+        try:
+            if not self.audio_buffer:
+                logger.info("Аудио буфер пуст, нечего транскрибировать")
+                self.root.after(0, lambda: self.status_var.set("Нет аудио для транскрибации"))
+                self.root.after(0, lambda: self.record_btn.config(text="Начать запись"))
+                self.root.after(0, lambda: self.indicator_canvas.itemconfig(self.indicator, fill="gray"))
+                return
+
+            # Создаем общий аудио файл из буфера
+            combined_wav_data = io.BytesIO()
+            
+            # Используем первый фрейм для определения параметров
+            first_frame = self.audio_buffer[0]
+            sample_rate = first_frame['sample_rate']
+            sample_width = first_frame['sample_width']
+            
+            # Проверяем корректность параметров аудио для WAV формата
+            if sample_width not in [1, 2, 4]:
+                logger.warning(f"Неподдерживаемый sample_width: {sample_width}")
+                self.root.after(0, lambda: self.status_var.set("Неподдерживаемый формат аудио"))
+                self.root.after(0, lambda: self.record_btn.config(text="Начать запись"))
+                self.root.after(0, lambda: self.indicator_canvas.itemconfig(self.indicator, fill="gray"))
+                return
+            
+            if sample_rate <= 0 or sample_rate > 192000:  # Максимальная частота дискретизации для WAV
+                logger.warning(f"Неподдерживаемая частота дискретизации: {sample_rate}")
+                self.root.after(0, lambda: self.status_var.set("Неподдерживаемый формат аудио"))
+                self.root.after(0, lambda: self.record_btn.config(text="Начать запись"))
+                self.root.after(0, lambda: self.indicator_canvas.itemconfig(self.indicator, fill="gray"))
+                return
+            
+            # Создаем WAV файл с объединенными данными
+            with wave.open(combined_wav_data, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # Обычно микрофон - моно (1 канал)
+                wav_file.setsampwidth(sample_width)
+                wav_file.setframerate(sample_rate)
+                
+                # Записываем все фреймы
+                for frame in self.audio_buffer:
+                    # Проверяем, что параметры совпадают с первым фреймом
+                    if frame['sample_rate'] != sample_rate or frame['sample_width'] != sample_width:
+                        logger.warning("Несоответствие параметров аудио во фрейме, пропускаем")
+                        continue
+                    wav_file.writeframes(frame['frame_data'])
+            
+            # Сохраняем временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+                temp_file.write(combined_wav_data.getvalue())
+                temp_filename = temp_file.name
+            logger.info(f"Временный файл создан для транскрибации: {temp_filename}")
+
+            # Выполняем транскрибацию
+            self.root.after(0, lambda: self.status_var.set("Выполняется транскрибация..."))
+            result = self.whisper_model.transcribe(temp_filename, language=self.get_whisper_language_code())
+            text = result['text']
+            logger.info(f"Транскрибация завершена. Результат: {text}")
+            
+            # Обновляем интерфейс в основном потоке
+            self.root.after(0, self.display_transcription_result, text)
+            
+        except FileNotFoundError as e:
+            # Ошибка может быть вызвана отсутствием ffmpeg или другого необходимого компонента
+            logger.error("Ошибка: необходимый компонент не найден. Установите ffmpeg для корректной работы Whisper.", exc_info=True)
+            self.root.after(0, lambda: self.status_var.set("Ошибка: отсутствует необходимый компонент (ffmpeg), см. логи..."))
+            self.root.after(0, lambda: self.record_btn.config(text="Начать запись"))
+            self.root.after(0, lambda: self.indicator_canvas.itemconfig(self.indicator, fill="gray"))
+        except Exception as e:
+            logger.error(f"Ошибка транскрибации: {e}", exc_info=True)
+            self.root.after(0, lambda: self.status_var.set(f"Ошибка транскрибации: {str(e)}"))
+            self.root.after(0, lambda: self.record_btn.config(text="Начать запись"))
+            self.root.after(0, lambda: self.indicator_canvas.itemconfig(self.indicator, fill="gray"))
+        finally:
+            # Удаляем временный файл
+            try:
+                if 'temp_filename' in locals() and os.path.exists(temp_filename):
+                    os.unlink(temp_filename)
+            except:
+                pass  # Игнорируем ошибки при удалении временного файла
+
+    def display_transcription_result(self, text):
+        """Отображает результат транскрибации в интерфейсе"""
+        # Очищаем текстовое поле и добавляем новый текст
+        self.text_area.delete("1.0", tk.END)
+        self.text_area.insert(tk.END, text)
+        self.text_area.see(tk.END)
+        
+        # Копируем в буфер обмена
+        pyperclip.copy(text)
+        
+        # Обновляем статус и кнопки
+        self.status_var.set("Транскрибация завершена! Результат скопирован в буфер обмена.")
+        self.record_btn.config(text="Начать запись")
+        self.indicator_canvas.itemconfig(self.indicator, fill="gray")
+
     def append_text(self, text):
         """Добавляет распознанный текст в текстовое поле"""
         current_text = self.text_area.get("1.0", tk.END).strip()
@@ -507,8 +612,13 @@ class VoiceTranscriberApp:
                 messagebox.showwarning("Внимание", "Нет текста для копирования")
 
     def clear_text(self):
-        """Очищает текстовое поле"""
+        """Очищает текстовое поле, буфер и буфер обмена"""
         self.text_area.delete("1.0", tk.END)
+        self.audio_buffer = []  # Очищаем аудио буфер
+        try:
+            pyperclip.copy("")  # Очищаем буфер обмена
+        except:
+            pass  # Если не удалось очистить буфер обмена, игнорируем ошибку
         self.status_var.set("Текст очищен")
 
     def get_whisper_language_code(self):
@@ -532,7 +642,21 @@ class VoiceTranscriberApp:
             for i in range(device_count):
                 info = audio.get_device_info_by_index(i)
                 if info['maxInputChannels'] > 0:  # Устройство поддерживает ввод
-                    input_devices.append((i, info['name']))
+                    # Декодируем имя устройства, чтобы избежать проблем с кодировкой
+                    device_name = info['name']
+                    try:
+                        # Попробуем декодировать строку, если она закодирована в неправильной кодировке
+                        if isinstance(device_name, bytes):
+                            device_name = device_name.decode('utf-8')
+                        else:
+                            # Если строка содержит искаженные символы, попробуем преобразовать
+                            # Попытка исправить кодировку, если есть проблемы с отображением
+                            device_name = device_name.encode('utf-8', errors='ignore').decode('utf-8')
+                    except UnicodeDecodeError:
+                        # Если возникла ошибка декодирования, используем оригинальное имя
+                        device_name = info['name']
+                    
+                    input_devices.append((i, device_name))
             
             audio.terminate()
             return input_devices
@@ -586,7 +710,12 @@ class VoiceTranscriberApp:
 
 def main():
     root = tk.Tk()
+    root.title("⏯ Голосовой - ⏯ранскрибер")  # Добавляем символ ⏯ в заголовок окна
     app = VoiceTranscriberApp(root)
+    
+    # Привязываем клавишу Escape к выходу из программы
+    root.bind('<Escape>', lambda e: root.destroy())
+    
     root.mainloop()
 
 
