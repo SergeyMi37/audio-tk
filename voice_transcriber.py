@@ -40,7 +40,7 @@ try:
     
     logger.info(f"Найдено {len(input_devices)} устройств ввода")
     for device_id, name in input_devices:
-        logger.info(f"  Устройство ввода {device_id}: {name}")
+        logger.info(f"  Устройство ввода {device_id}: {name.encode('cp1251').decode('utf-8')}")
     
     audio.terminate()
     
@@ -202,8 +202,8 @@ class VoiceTranscriberApp:
         # Устройство ввода (в одной строке)
         ttk.Label(main_frame, text="Устройство ввода:").grid(row=4, column=0, sticky="w", padx=2, pady=2)
         
-        # Подготовка значений для комбобокса (форматируем названия устройств) .encode('cp1252').decode('utf-8')
-        device_values = [f"{device_id}: {name}" for device_id, name in self.input_devices]
+        # Подготовка значений для комбобокса (форматируем названия устройств)
+        device_values = [f"{device_id}: {name.encode('cp1251').decode('utf-8')}" for device_id, name in self.input_devices]
         if not device_values:
             device_values = ["Нет доступных устройств"]
         
